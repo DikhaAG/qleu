@@ -6,30 +6,119 @@ if (session_status() === PHP_SESSION_NONE) session_start();
  * Guard: admin wajib login
  */
 if (!isset($_SESSION['admin']['id'])) {
-    header('Location: /admin/login.php');
+    header('Location: ./login.php');
     exit;
 }
 
 // Data admin
 $adminName = $_SESSION['admin']['name'] ?? 'Admin';
 
-// KPI counts
-$count_products = (int) (mysqli_fetch_assoc(mysqli_query($conn, "SELECT COUNT(*) AS cnt FROM products"))['cnt'] ?? 0);
-$count_orders   = (int) (mysqli_fetch_assoc(mysqli_query($conn, "SELECT COUNT(*) AS cnt FROM orders"))['cnt'] ?? 0);
-$count_users    = (int) (mysqli_fetch_assoc(mysqli_query($conn, "SELECT COUNT(*) AS cnt FROM users"))['cnt'] ?? 0);
+/**
+ * =============== FILTER RANGE TANGGAL (GET) ===============
+ * Parameter:
+ * - start_date=YYYY-MM-DD
+ * - end_date=YYYY-MM-DD
+ *
+ * Default: 14 hari terakhir (termasuk hari ini)
+ */
+function isValidDateYmd($date) {
+    if (!$date) return false;
+    $d = DateTime::createFromFormat('Y-m-d', $date);
+    return $d && $d->format('Y-m-d') === $date;
+}
 
-// Optional: order terbaru (kalau tabel orders/user sudah ada)
+$today = new DateTime('today');
+$defaultStart = (new DateTime('today'))->modify('-13 days'); // total 14 hari termasuk hari ini
+
+$start_date = isset($_GET['start_date']) && isValidDateYmd($_GET['start_date'])
+    ? $_GET['start_date']
+    : $defaultStart->format('Y-m-d');
+
+$end_date = isset($_GET['end_date']) && isValidDateYmd($_GET['end_date'])
+    ? $_GET['end_date']
+    : $today->format('Y-m-d');
+
+// pastikan start <= end
+if ($start_date > $end_date) {
+    $tmp = $start_date;
+    $start_date = $end_date;
+    $end_date = $tmp;
+}
+
+// range waktu untuk query
+$startDT = $start_date . ' 00:00:00';
+$endDTExclusive = (new DateTime($end_date))->modify('+1 day')->format('Y-m-d') . ' 00:00:00'; // eksklusif
+
+$startDT_esc = mysqli_real_escape_string($conn, $startDT);
+$endDT_esc   = mysqli_real_escape_string($conn, $endDTExclusive);
+
+/**
+ * =============== KPI COUNTS ===============
+ * - Total Produk (overall)
+ * - Total Order (dalam range)
+ * - Total Pelanggan (overall)
+ */
+$count_products = (int) (mysqli_fetch_assoc(mysqli_query($conn, "SELECT COUNT(*) AS cnt FROM products"))['cnt'] ?? 0);
+
+$count_orders_range = 0;
+$qCountOrders = mysqli_query($conn, "
+  SELECT COUNT(*) AS cnt
+  FROM orders
+  WHERE order_date >= '$startDT_esc' AND order_date < '$endDT_esc'
+");
+if ($qCountOrders) $count_orders_range = (int)(mysqli_fetch_assoc($qCountOrders)['cnt'] ?? 0);
+
+$count_users = (int) (mysqli_fetch_assoc(mysqli_query($conn, "SELECT COUNT(*) AS cnt FROM users"))['cnt'] ?? 0);
+
+/**
+ * =============== CHART DATA: jumlah qty product per tanggal ===============
+ * Query: SUM(order_items.qty) grouped by DATE(orders.order_date)
+ */
+$qtyByDate = []; // ['YYYY-MM-DD' => total_qty]
+$qChart = mysqli_query($conn, "
+  SELECT DATE(o.order_date) AS d, COALESCE(SUM(oi.qty), 0) AS total_qty
+  FROM orders o
+  LEFT JOIN order_items oi ON oi.order_id = o.id
+  WHERE o.order_date >= '$startDT_esc' AND o.order_date < '$endDT_esc'
+  GROUP BY DATE(o.order_date)
+  ORDER BY d ASC
+");
+
+if ($qChart) {
+    while ($r = mysqli_fetch_assoc($qChart)) {
+        $qtyByDate[$r['d']] = (int)$r['total_qty'];
+    }
+}
+
+// bikin deret tanggal lengkap (biar kalau tidak ada order di suatu hari tetap muncul 0)
+$labels = [];
+$values = [];
+
+$cursor = new DateTime($start_date);
+$endObj = new DateTime($end_date);
+
+while ($cursor <= $endObj) {
+    $d = $cursor->format('Y-m-d');
+    $labels[] = $d;
+    $values[] = $qtyByDate[$d] ?? 0;
+    $cursor->modify('+1 day');
+}
+
+/**
+ * =============== Latest Orders (dalam range) ===============
+ */
 $latestOrders = [];
 $qOrders = mysqli_query($conn, "
   SELECT o.id, o.order_date, o.total_amount, o.status, u.name AS customer
   FROM orders o
   LEFT JOIN users u ON u.id = o.user_id
+  WHERE o.order_date >= '$startDT_esc' AND o.order_date < '$endDT_esc'
   ORDER BY o.order_date DESC
   LIMIT 6
 ");
 
 if ($qOrders) {
-  while ($r = mysqli_fetch_assoc($qOrders)) $latestOrders[] = $r;
+    while ($r = mysqli_fetch_assoc($qOrders)) $latestOrders[] = $r;
 }
 ?>
 <!DOCTYPE html>
@@ -40,6 +129,9 @@ if ($qOrders) {
   <title>Admin Dashboard - Mitra Cafe</title>
   <link rel="stylesheet" href="../assets/css/style.css" />
 
+  <!-- Chart.js (CDN) -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+
   <style>
     /* Tambahan kecil khusus dashboard admin (masih satu rasa UI) */
     .kpi-grid{
@@ -48,9 +140,7 @@ if ($qOrders) {
       gap: var(--gap);
       margin-top: 14px;
     }
-    .kpi-card{
-      padding: 18px;
-    }
+    .kpi-card{ padding: 18px; }
     .kpi-card .label{
       color: var(--muted);
       font-size: 12px;
@@ -95,9 +185,7 @@ if ($qOrders) {
       font-weight: 850;
       font-size: 13px;
     }
-    .qa:hover{
-      border-color: rgba(47,107,255,.25);
-    }
+    .qa:hover{ border-color: rgba(47,107,255,.25); }
     .qa .dot{
       width: 10px; height: 10px;
       border-radius: 50%;
@@ -149,13 +237,71 @@ if ($qOrders) {
       opacity: .55;
     }
 
+    /* ===== Filter range ===== */
+    .filter-bar{
+      display:flex;
+      align-items:center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-top: 8px;
+      padding: 12px 14px;
+      border-radius: 18px;
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,.92);
+    }
+    .filter-bar .left{
+      display:flex;
+      align-items:center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .filter-bar label{
+      font-size: 12px;
+      font-weight: 900;
+      color: var(--muted);
+    }
+    .filter-bar input[type="date"]{
+      padding: 10px 12px;
+      border-radius: 14px;
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,.95);
+      outline:none;
+      font-weight: 800;
+      font-size: 12px;
+    }
+    .filter-bar .right{
+      display:flex;
+      gap: 10px;
+      align-items:center;
+      flex-wrap: wrap;
+    }
+
+    /* ===== Chart container ===== */
+    .chart-wrap{
+      height: 280px;
+      border-radius: 18px;
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,.95);
+      padding: 12px;
+    }
+    .chart-note{
+      margin-top: 10px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.6;
+    }
+
     /* Responsive */
     @media (max-width: 1100px){
       .kpi-grid{ grid-template-columns: repeat(2, 1fr); }
       .grid-2{ grid-template-columns: 1fr; }
+      .chart-wrap{ height: 260px; }
     }
     @media (max-width: 860px){
       .kpi-grid{ grid-template-columns: 1fr; }
+      .chart-wrap{ height: 240px; }
+      .filter-bar{ align-items: stretch; flex-direction: column; }
+      .filter-bar .right{ justify-content:flex-end; }
     }
   </style>
 </head>
@@ -165,7 +311,7 @@ if ($qOrders) {
     <div class="app">
       <div class="app-inner">
 
-        <!-- SIDEBAR (Admin version, sama gaya) -->
+        <!-- SIDEBAR (Admin version) -->
         <aside class="sidebar">
           <div class="brand">
             <div class="logo"></div>
@@ -177,17 +323,17 @@ if ($qOrders) {
 
           <div class="side-section">Menu</div>
           <nav class="side-nav">
-            <a class="side-link active" href="/admin/dashboard.php">Dashboard</a>
-            <a class="side-link" href="/admin/products.php">Produk</a>
-            <a class="side-link" href="/admin/orders.php">Transaksi</a>
-            <a class="side-link" href="/admin/users.php">Pelanggan</a>
-            <a class="side-link" href="/admin/profile.php">Profil</a>
+            <a class="side-link active" href="./dashboard.php">Dashboard</a>
+            <a class="side-link" href="./products.php">Produk</a>
+            <a class="side-link" href="./orders.php">Transaksi</a>
+            <a class="side-link" href="./users.php">Pelanggan</a>
+            <a class="side-link" href="./profile.php">Profil</a>
           </nav>
 
           <div class="side-section" style="margin-top:18px;">Shortcut</div>
           <nav class="side-nav">
-            <a class="side-link" href="/pages/index.php">Lihat Toko</a>
-            <a class="side-link" href="/admin/logout.php">Logout</a>
+            <a class="side-link" href="../pages/index.php">Lihat Toko</a>
+            <a class="side-link" href="./logout.php">Logout</a>
           </nav>
 
           <div class="side-bottom">
@@ -207,7 +353,7 @@ if ($qOrders) {
               <div class="avatar"></div>
               <div class="text">
                 <b>Welcome back, <?= htmlspecialchars($adminName) ?></b>
-                <span>Ringkasan toko hari ini dan aksi cepat.</span>
+                <span>Ringkasan toko berdasarkan rentang tanggal.</span>
               </div>
             </div>
 
@@ -216,45 +362,73 @@ if ($qOrders) {
             </div>
           </div>
 
+          <!-- FILTER RANGE -->
+          <form class="filter-bar" method="GET" action="./dashboard.php">
+            <div class="left">
+              <label>Filter tanggal</label>
+              <input type="date" name="start_date" value="<?= htmlspecialchars($start_date) ?>" required>
+              <span style="opacity:.5; font-weight:900;">→</span>
+              <input type="date" name="end_date" value="<?= htmlspecialchars($end_date) ?>" required>
+            </div>
+            <div class="right">
+              <button class="btn" type="submit">Terapkan</button>
+              <a class="btn outline" href="./dashboard.php" style="text-decoration:none; display:inline-flex; align-items:center;">Reset</a>
+            </div>
+          </form>
+
           <!-- KPI Cards -->
           <div class="section-head">
             <h3>Overview</h3>
-            <a href="/admin/orders.php">Lihat transaksi</a>
+            <a href="./orders.php">Lihat transaksi</a>
           </div>
 
           <div class="kpi-grid">
             <div class="card kpi-card">
               <p class="label">Total Produk</p>
               <p class="value"><?= number_format($count_products, 0, ',', '.') ?></p>
-              <p class="hint">Jumlah menu aktif di katalog.</p>
+              <p class="hint">Jumlah menu aktif di katalog (overall).</p>
             </div>
 
             <div class="card kpi-card">
-              <p class="label">Total Order</p>
-              <p class="value"><?= number_format($count_orders, 0, ',', '.') ?></p>
-              <p class="hint">Semua transaksi yang tercatat.</p>
+              <p class="label">Total Order (Range)</p>
+              <p class="value"><?= number_format($count_orders_range, 0, ',', '.') ?></p>
+              <p class="hint">Order dari <?= htmlspecialchars($start_date) ?> s/d <?= htmlspecialchars($end_date) ?>.</p>
             </div>
 
             <div class="card kpi-card">
               <p class="label">Total Pelanggan</p>
               <p class="value"><?= number_format($count_users, 0, ',', '.') ?></p>
-              <p class="hint">Pengguna terdaftar.</p>
+              <p class="hint">Pengguna terdaftar (overall).</p>
             </div>
           </div>
 
           <!-- Content 2 columns -->
           <div class="grid-2">
 
-            <!-- Latest Orders -->
+            <!-- Chart Orders -->
             <div class="card" style="padding:18px;">
               <div class="section-head" style="margin:0 0 10px;">
-                <h3>Order Terbaru</h3>
-                <a href="/admin/orders.php">Kelola</a>
+                <h3>Order per Hari (Total Qty Produk)</h3>
+                <a href="./orders.php">Kelola</a>
+              </div>
+
+              <div class="chart-wrap">
+                <canvas id="ordersChart"></canvas>
+              </div>
+
+              <div class="chart-note">
+                Grafik menampilkan <b>jumlah total item</b> yang dipesan per hari (SUM <code>order_items.qty</code>) pada rentang tanggal.
+              </div>
+
+              <!-- Latest orders small list (masih berguna) -->
+              <div class="section-head" style="margin:16px 0 10px;">
+                <h3 style="font-size:14px;">Order Terbaru (Range)</h3>
+                <a href="./orders.php">Detail</a>
               </div>
 
               <?php if (count($latestOrders) === 0): ?>
-                <div style="opacity:.65; padding:18px; text-align:center;">
-                  Belum ada order atau tabel orders belum terisi.
+                <div style="opacity:.65; padding:14px; text-align:center;">
+                  Tidak ada order pada rentang tanggal ini.
                 </div>
               <?php else: ?>
                 <table class="table">
@@ -291,20 +465,20 @@ if ($qOrders) {
             <div class="card" style="padding:18px;">
               <div class="section-head" style="margin:0 0 10px;">
                 <h3>Quick Actions</h3>
-                <a href="/admin/products.php">Manage</a>
+                <a href="./products.php">Manage</a>
               </div>
 
               <div class="quick-actions">
-                <a class="qa" href="/admin/product_add.php">
+                <a class="qa" href="./product_add.php">
                   <span class="dot"></span> Tambah Produk
                 </a>
-                <a class="qa" href="/admin/products.php">
+                <a class="qa" href="./products.php">
                   <span class="dot"></span> Edit Produk
                 </a>
-                <a class="qa" href="/admin/orders.php">
+                <a class="qa" href="./orders.php">
                   <span class="dot"></span> Cek Transaksi
                 </a>
-                <a class="qa" href="/pages/index.php">
+                <a class="qa" href="../pages/index.php">
                   <span class="dot"></span> Lihat Toko
                 </a>
               </div>
@@ -321,6 +495,57 @@ if ($qOrders) {
       </div>
     </div>
   </div>
+
+<script>
+  // Data chart dari PHP
+  const chartLabels = <?= json_encode($labels, JSON_UNESCAPED_SLASHES) ?>;
+  const chartValues = <?= json_encode($values, JSON_UNESCAPED_SLASHES) ?>;
+
+  const ctx = document.getElementById('ordersChart');
+
+  // Line chart sederhana (tanpa set warna spesifik agar tetap "default clean")
+  new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels: chartLabels,
+      datasets: [{
+        label: 'Total Qty Produk / Hari',
+        data: chartValues,
+        tension: 0.35,
+        pointRadius: 3,
+        pointHoverRadius: 5,
+        borderWidth: 2,
+        fill: false
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: {
+        mode: 'index',
+        intersect: false
+      },
+      plugins: {
+        legend: { display: true }
+      },
+      scales: {
+        x: {
+          ticks: {
+            maxRotation: 0,
+            autoSkip: true,
+            maxTicksLimit: 8
+          }
+        },
+        y: {
+          beginAtZero: true,
+          ticks: {
+            precision: 0
+          }
+        }
+      }
+    }
+  });
+</script>
 
 </body>
 </html>
