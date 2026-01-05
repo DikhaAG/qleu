@@ -212,10 +212,6 @@ if ($qOrders) {
             </div>
 
             <div class="top-actions">
-              <div class="search" style="max-width: 420px;">
-                <span style="opacity:.55;">🔎</span>
-                <input type="text" placeholder="Cari order / produk (dummy)..." disabled />
-              </div>
               <button class="icon-btn" title="Settings">⚙️</button>
             </div>
           </div>
