@@ -53,22 +53,54 @@ $startDT_esc = mysqli_real_escape_string($conn, $startDT);
 $endDT_esc   = mysqli_real_escape_string($conn, $endDTExclusive);
 
 /**
- * =============== KPI COUNTS ===============
- * - Total Produk (overall)
- * - Total Order (dalam range)
- * - Total Pelanggan (overall)
+ * =============== KPI COUNTS (SEMUA TER-FILTER RANGE) ===============
+ * orders: filter berdasarkan orders.order_date ✅
+ * products: filter berdasarkan products.created_at (jika ada) ✅
+ * users: filter berdasarkan users.created_at (jika ada) ✅
+ *
+ * Kalau kolom created_at tidak ada, otomatis fallback ke overall (biar tidak error).
  */
-$count_products = (int) (mysqli_fetch_assoc(mysqli_query($conn, "SELECT COUNT(*) AS cnt FROM products"))['cnt'] ?? 0);
+function hasColumn(mysqli $conn, string $table, string $column): bool {
+    $t = mysqli_real_escape_string($conn, $table);
+    $c = mysqli_real_escape_string($conn, $column);
+    $res = mysqli_query($conn, "SHOW COLUMNS FROM `$t` LIKE '$c'");
+    return $res && mysqli_num_rows($res) > 0;
+}
 
-$count_orders_range = 0;
+$productsHasCreatedAt = hasColumn($conn, 'products', 'created_at');
+$usersHasCreatedAt    = hasColumn($conn, 'users', 'created_at');
+
+// Total Produk (range kalau ada created_at)
+if ($productsHasCreatedAt) {
+    $q = mysqli_query($conn, "
+      SELECT COUNT(*) AS cnt
+      FROM products
+      WHERE created_at >= '$startDT_esc' AND created_at < '$endDT_esc'
+    ");
+    $count_products = (int)(mysqli_fetch_assoc($q)['cnt'] ?? 0);
+} else {
+    $count_products = (int)(mysqli_fetch_assoc(mysqli_query($conn, "SELECT COUNT(*) AS cnt FROM products"))['cnt'] ?? 0);
+}
+
+// Total Order (range)
 $qCountOrders = mysqli_query($conn, "
   SELECT COUNT(*) AS cnt
   FROM orders
   WHERE order_date >= '$startDT_esc' AND order_date < '$endDT_esc'
 ");
-if ($qCountOrders) $count_orders_range = (int)(mysqli_fetch_assoc($qCountOrders)['cnt'] ?? 0);
+$count_orders_range = $qCountOrders ? (int)(mysqli_fetch_assoc($qCountOrders)['cnt'] ?? 0) : 0;
 
-$count_users = (int) (mysqli_fetch_assoc(mysqli_query($conn, "SELECT COUNT(*) AS cnt FROM users"))['cnt'] ?? 0);
+// Total Pelanggan (range kalau ada created_at)
+if ($usersHasCreatedAt) {
+    $q = mysqli_query($conn, "
+      SELECT COUNT(*) AS cnt
+      FROM users
+      WHERE created_at >= '$startDT_esc' AND created_at < '$endDT_esc'
+    ");
+    $count_users = (int)(mysqli_fetch_assoc($q)['cnt'] ?? 0);
+} else {
+    $count_users = (int)(mysqli_fetch_assoc(mysqli_query($conn, "SELECT COUNT(*) AS cnt FROM users"))['cnt'] ?? 0);
+}
 
 /**
  * =============== CHART DATA: jumlah qty product per tanggal ===============
@@ -133,7 +165,6 @@ if ($qOrders) {
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 
   <style>
-    /* Tambahan kecil khusus dashboard admin (masih satu rasa UI) */
     .kpi-grid{
       display:grid;
       grid-template-columns: repeat(3, 1fr);
@@ -157,6 +188,7 @@ if ($qOrders) {
       margin: 8px 0 0;
       font-size: 12px;
       color: var(--muted);
+      line-height: 1.6;
     }
 
     .grid-2{
@@ -237,7 +269,6 @@ if ($qOrders) {
       opacity: .55;
     }
 
-    /* ===== Filter range ===== */
     .filter-bar{
       display:flex;
       align-items:center;
@@ -276,7 +307,6 @@ if ($qOrders) {
       flex-wrap: wrap;
     }
 
-    /* ===== Chart container ===== */
     .chart-wrap{
       height: 280px;
       border-radius: 18px;
@@ -291,7 +321,6 @@ if ($qOrders) {
       line-height: 1.6;
     }
 
-    /* Responsive */
     @media (max-width: 1100px){
       .kpi-grid{ grid-template-columns: repeat(2, 1fr); }
       .grid-2{ grid-template-columns: 1fr; }
@@ -384,9 +413,13 @@ if ($qOrders) {
 
           <div class="kpi-grid">
             <div class="card kpi-card">
-              <p class="label">Total Produk</p>
+              <p class="label">Total Produk (Range)</p>
               <p class="value"><?= number_format($count_products, 0, ',', '.') ?></p>
-              <p class="hint">Jumlah menu aktif di katalog (overall).</p>
+              <p class="hint">
+                <?= $productsHasCreatedAt
+                    ? 'Produk dibuat pada rentang tanggal.'
+                    : 'Tabel products tidak punya created_at, jadi ini total keseluruhan.'; ?>
+              </p>
             </div>
 
             <div class="card kpi-card">
@@ -396,9 +429,13 @@ if ($qOrders) {
             </div>
 
             <div class="card kpi-card">
-              <p class="label">Total Pelanggan</p>
+              <p class="label">Total Pelanggan (Range)</p>
               <p class="value"><?= number_format($count_users, 0, ',', '.') ?></p>
-              <p class="hint">Pengguna terdaftar (overall).</p>
+              <p class="hint">
+                <?= $usersHasCreatedAt
+                    ? 'Pelanggan daftar pada rentang tanggal.'
+                    : 'Tabel users tidak punya created_at, jadi ini total keseluruhan.'; ?>
+              </p>
             </div>
           </div>
 
@@ -420,7 +457,7 @@ if ($qOrders) {
                 Grafik menampilkan <b>jumlah total item</b> yang dipesan per hari (SUM <code>order_items.qty</code>) pada rentang tanggal.
               </div>
 
-              <!-- Latest orders small list (masih berguna) -->
+              <!-- Latest orders small list -->
               <div class="section-head" style="margin:16px 0 10px;">
                 <h3 style="font-size:14px;">Order Terbaru (Range)</h3>
                 <a href="./orders.php">Detail</a>
@@ -497,13 +534,11 @@ if ($qOrders) {
   </div>
 
 <script>
-  // Data chart dari PHP
   const chartLabels = <?= json_encode($labels, JSON_UNESCAPED_SLASHES) ?>;
   const chartValues = <?= json_encode($values, JSON_UNESCAPED_SLASHES) ?>;
 
   const ctx = document.getElementById('ordersChart');
 
-  // Line chart sederhana (tanpa set warna spesifik agar tetap "default clean")
   new Chart(ctx, {
     type: 'line',
     data: {
@@ -521,26 +556,15 @@ if ($qOrders) {
     options: {
       responsive: true,
       maintainAspectRatio: false,
-      interaction: {
-        mode: 'index',
-        intersect: false
-      },
-      plugins: {
-        legend: { display: true }
-      },
+      interaction: { mode: 'index', intersect: false },
+      plugins: { legend: { display: true } },
       scales: {
         x: {
-          ticks: {
-            maxRotation: 0,
-            autoSkip: true,
-            maxTicksLimit: 8
-          }
+          ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: 8 }
         },
         y: {
           beginAtZero: true,
-          ticks: {
-            precision: 0
-          }
+          ticks: { precision: 0 }
         }
       }
     }
